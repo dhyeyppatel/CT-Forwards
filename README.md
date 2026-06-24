@@ -1,10 +1,10 @@
-# 🔁 MN Auto Forward Bot
+# 🔁 Common Thread Auto Forward Bot
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.11+-blue?style=for-the-badge&logo=python"/>
   <img src="https://img.shields.io/badge/Deployed%20On-Koyeb-blueviolet?style=for-the-badge"/>
   <img src="https://img.shields.io/badge/Telegram-Userbot%20%7C%20Bot-blue?style=for-the-badge&logo=telegram"/>
-  <img src="https://img.shields.io/github/license/MN-BOTS/MN-Auto-Forward-Bot?style=for-the-badge"/>
+  <img src="https://img.shields.io/github/license/dhyeyppatel/CT-Forwards?style=for-the-badge"/>
 </p>
 
 A Python-based Telegram auto-forwarding solution supporting **two interchangeable modes**:
@@ -105,8 +105,8 @@ Save your `api_id` and `api_hash`.
 
 ```bash
 # Clone the repo
-git clone https://github.com/MN-BOTS/MN-Auto-Forward-Bot.git
-cd MN-Auto-Forward-Bot
+git clone https://github.com/dhyeyppatel/CT-Forwards.git
+cd CT-Forwards
 
 # Install dependencies
 pip install telethon python-dotenv
@@ -165,8 +165,8 @@ Enter your phone number and the OTP. The script prints your `SESSION_STRING` —
 
 ```bash
 # Clone and install
-git clone https://github.com/MN-BOTS/MN-Auto-Forward-Bot.git
-cd MN-Auto-Forward-Bot
+git clone https://github.com/dhyeyppatel/CT-Forwards.git
+cd CT-Forwards
 pip install -r requirements.txt
 
 # Configure
@@ -217,7 +217,7 @@ No — set `MODE` to either `userbot` or `bot`. Deploy two separate services if 
 
 ## 🆘 Support
 
-💬 **[@mnbots_support](https://t.me/mnbots_support)**
+💬 **[@commonthread_support](https://t.me/commonthread_support)**
 
 ---
 

@@ -28,7 +28,7 @@ def run_bot(config):
 
     async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
-            "✅ *MN Auto Forward Bot is running!*\n\n"
+            "✅ *Common Thread Auto Forward Bot is running!*\n\n"
             "This bot silently forwards messages between channels "
             "with no 'Forwarded From' header.\n\n"
             f"📋 *Rules loaded:* {len(rules.rules)}\n"

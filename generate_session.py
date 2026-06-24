@@ -41,7 +41,7 @@ async def main():
         sys.exit(1)
 
     print("=" * 60)
-    print("  MN Auto Forward Bot — Session Generator")
+    print("  Common Thread Auto Forward Bot — Session Generator")
     print("=" * 60)
     print(f"  API_ID   : {api_id}")
     print(f"  API_HASH : {api_hash[:8]}{'*' * (len(api_hash) - 8)}")

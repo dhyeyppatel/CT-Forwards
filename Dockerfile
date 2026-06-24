@@ -1,8 +1,8 @@
 FROM python:3.11-slim
 
 # Metadata
-LABEL maintainer="MN Bots" \
-      description="MN Auto Forward Bot — Userbot & Bot mode"
+LABEL maintainer="Common Thread" \
+      description="Common Thread Auto Forward Bot — Userbot & Bot mode"
 
 # Set working directory
 WORKDIR /app

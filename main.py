@@ -1,5 +1,5 @@
 """
-MN Auto Forward Bot — Entry Point
+Common Thread Auto Forward Bot — Entry Point
 ==================================
 Supports two modes:
   MODE=userbot  → Telethon userbot (reads any public channel, no membership needed)
@@ -68,7 +68,7 @@ def main():
         _start_health_server(config.PORT)
 
     mode = config.MODE
-    logger.info(f"🚀 Starting MN Auto Forward Bot | Mode: {mode.upper()}")
+    logger.info(f"🚀 Starting Common Thread Auto Forward Bot | Mode: {mode.upper()}")
 
     if mode == "userbot":
         from modes.userbot_mode import run_userbot
