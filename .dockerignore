@@ -1,0 +1,31 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Telethon session files (never include in image — use SESSION_STRING env var)
+*.session
+*.session-journal
+
+# Environment files (secrets)
+.env
+.env.local
+
+# Git
+.git/
+.gitignore
+
+# Dev / IDE
+.vscode/
+.idea/
+*.swp
+
+# Docs (not needed in container)
+*.md
+LICENSE
+
+# Old Node.js artifacts (if still present locally)
+node_modules/
+package-lock.json
