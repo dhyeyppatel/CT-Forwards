@@ -1,167 +1,250 @@
-"""Userbot mode using Telethon (MTProto).
+"""
+modes/userbot_mode.py — Telethon userbot forwarding.
 
-The userbot can read from ANY public channel without being a member,
-and any private channel/group it has joined as a regular user.
+Reads from source channels without requiring bot membership.
+Supports:
+  • Album (grouped media) forwarding with album integrity
+  • Word replacement, prefix/suffix on text/captions
+  • Edit sync — edits in source replicate to all target copies
+  • Delete sync — deletions in source remove all target copies
+  • FloodWait retry
+  • Maintenance mode pause
 """
 import asyncio
 import logging
 from collections import defaultdict
 
 from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError, ChannelPrivateError
+from telethon.errors import (
+    FloodWaitError,
+    ChannelPrivateError,
+    MessageNotModifiedError,
+    MessageIdInvalidError,
+)
 from telethon.sessions import StringSession
 
-from forwarder import ForwardRules
+from forwarder import apply_text_processing, resolve_chat_id, should_skip
 
 logger = logging.getLogger(__name__)
 
-# Album (grouped message) collector:
-# grouped_id -> list of messages, used to forward full albums together.
-_album_buffer: dict = defaultdict(list)
-_album_timers: dict = {}
-
-ALBUM_WAIT_SECONDS = 1.5  # wait this long after first msg in album before forwarding
+ALBUM_WAIT_SECONDS = 1.5  # debounce window for media groups
 
 
-async def run_userbot(config):
-    rules = ForwardRules(config.FORWARD_RULES_RAW, config.SKIP_TERMS_RAW)
-    all_sources = rules.get_all_sources()
+async def run_userbot(config, db, client=None):
+    """Start the Telethon userbot and run until disconnected.
 
-    # Convert source IDs to int where possible (Telethon needs int for channel IDs)
-    source_ids = []
-    for s in all_sources:
-        stripped = s.lstrip("-")
-        source_ids.append(int(s) if stripped.isdigit() else s)
+    Args:
+        client: Optional pre-built TelegramClient to reuse (shared with the
+                management panel for name lookups).  If None, a new client
+                is created from config credentials.
+    """
 
-    if not source_ids:
-        logger.error("❌ No valid source IDs found in FORWARD_RULES. Exiting.")
-        return
-
-    # Choose session type
-    if config.SESSION_STRING:
-        session = StringSession(config.SESSION_STRING)
-        logger.info("🔑 Using SESSION_STRING (cloud mode)")
+    # Session / client setup
+    if client is None:
+        if config.SESSION_STRING:
+            session = StringSession(config.SESSION_STRING)
+            logger.info("🔑 Userbot: using SESSION_STRING (new client)")
+        else:
+            session = "userbot_session"
+            logger.info("🔑 Userbot: using local session file (new client)")
+        client = TelegramClient(session, config.API_ID, config.API_HASH)
     else:
-        session = "userbot_session"  # saves userbot_session.session locally
-        logger.info("🔑 Using local session file (userbot_session.session)")
+        logger.info("🔑 Userbot: reusing shared TelegramClient")
 
-    client = TelegramClient(session, config.API_ID, config.API_HASH)
+    # Album buffers: grouped_id → list[Message]
+    _album_buf: dict[int, list] = defaultdict(list)
+    _album_tasks: dict[int, asyncio.Task] = {}
 
-    # ── Core forwarding helper ─────────────────────────────────────────────
+    # ── Text helpers ──────────────────────────────────────────────────────────
 
-    async def do_forward(messages: list, source_id):
-        """Forward a list of messages (album or single) to all target chats."""
-        targets = rules.get_targets(source_id)
+    async def _get_processing_args():
+        replacements = await db.get_replacements()
+        prefix = await db.get_config("prefix", "")
+        suffix = await db.get_config("suffix", "")
+        return replacements, prefix, suffix
+
+    async def _process(text: str) -> str:
+        replacements, prefix, suffix = await _get_processing_args()
+        return apply_text_processing(text, replacements, prefix, suffix)
+
+    # ── Forward a list of messages to all applicable targets ──────────────────
+
+    async def _forward_messages(msgs: list, source_chat_id: int):
+        targets = await db.get_targets_for_source(source_chat_id)
         if not targets:
             return
 
-        # Skip check on the first (or only) message
-        first = messages[0]
-        text = getattr(first, "text", "") or ""
-        caption = getattr(first, "message", "") or ""
-        if rules.should_skip(text, caption):
-            logger.info(f"⏭️  Skipped msg(s) from {source_id}")
+        # Skip check on first message
+        first = msgs[0]
+        text_raw = getattr(first, "text", "") or getattr(first, "message", "") or ""
+        skip_terms = await db.get_skip_terms()
+        if should_skip(text_raw, "", skip_terms):
+            logger.info(f"⏭️  Skipped msg {first.id} from {source_chat_id}")
             return
 
+        replacements, prefix, suffix = await _get_processing_args()
+        needs_edit = bool(replacements or prefix or suffix)
+
         for target_raw in targets:
-            target = rules.resolve_chat_id(target_raw)
+            target = resolve_chat_id(target_raw)
             try:
-                await client.forward_messages(
+                sent = await client.forward_messages(
                     entity=target,
-                    messages=messages,
-                    from_peer=source_id,
+                    messages=msgs,
+                    from_peer=source_chat_id,
                     drop_author=True,
                 )
-                ids = [m.id for m in messages]
-                logger.info(f"✅ Forwarded {ids} : {source_id} → {target_raw}")
+                # Normalise to list
+                if not isinstance(sent, list):
+                    sent = [sent]
+
+                # Store source→target mapping for edit/delete sync
+                for src_msg, tgt_msg in zip(msgs, sent):
+                    await db.store_message_map(
+                        source_chat_id, src_msg.id, target_raw, tgt_msg.id
+                    )
+
+                # Apply text modifications by editing the forwarded copy
+                if needs_edit:
+                    for src_msg, tgt_msg in zip(msgs, sent):
+                        raw = (
+                            getattr(src_msg, "text", "")
+                            or getattr(src_msg, "message", "")
+                            or ""
+                        )
+                        modified = apply_text_processing(raw, replacements, prefix, suffix)
+                        if modified != raw:
+                            try:
+                                await client.edit_message(target, tgt_msg, text=modified)
+                            except (MessageNotModifiedError, MessageIdInvalidError):
+                                pass
+                            except Exception as edit_err:
+                                logger.warning(f"⚠️  Text mod failed: {edit_err}")
+
+                logger.info(
+                    f"✅ Forwarded {[m.id for m in msgs]} : {source_chat_id} → {target_raw}"
+                )
+
             except FloodWaitError as e:
-                logger.warning(f"⏳ FloodWait {e.seconds}s before retrying {target_raw}")
+                logger.warning(f"⏳ FloodWait {e.seconds}s → {target_raw}")
                 await asyncio.sleep(e.seconds)
-                # Retry once after flood wait
+                # One retry
                 try:
                     await client.forward_messages(
                         entity=target,
-                        messages=messages,
-                        from_peer=source_id,
+                        messages=msgs,
+                        from_peer=source_chat_id,
                         drop_author=True,
                     )
-                    logger.info(f"✅ Forwarded (retry): {source_id} → {target_raw}")
-                except Exception as retry_err:
-                    logger.error(f"❌ Retry failed {target_raw}: {retry_err}")
+                except Exception as err:
+                    logger.error(f"❌ Retry failed → {target_raw}: {err}")
             except ChannelPrivateError:
-                logger.error(
-                    f"❌ Cannot access {target_raw} — private channel or not a member"
-                )
+                logger.error(f"❌ Private/inaccessible: {target_raw}")
             except Exception as e:
-                logger.error(f"❌ Failed to forward to {target_raw}: {e}")
+                logger.error(f"❌ Forward error → {target_raw}: {e}")
 
-    # ── Album (grouped media) handling ─────────────────────────────────────
+    # ── Album debounce helper ─────────────────────────────────────────────────
 
-    async def flush_album(grouped_id: int, source_id: int):
-        """Called after ALBUM_WAIT_SECONDS to forward collected album messages."""
+    async def _flush_album(grouped_id: int, source_chat_id: int):
         await asyncio.sleep(ALBUM_WAIT_SECONDS)
-        msgs = _album_buffer.pop(grouped_id, [])
-        _album_timers.pop(grouped_id, None)
+        msgs = _album_buf.pop(grouped_id, [])
+        _album_tasks.pop(grouped_id, None)
         if msgs:
             msgs.sort(key=lambda m: m.id)
-            await do_forward(msgs, source_id)
+            await _forward_messages(msgs, source_chat_id)
 
-    async def handle_message_event(event, is_edit: bool = False):
-        """Unified handler for new messages and edited messages."""
+    # ── Event: New message ────────────────────────────────────────────────────
+
+    @client.on(events.NewMessage())
+    async def on_new_message(event):
+        source_ids = await db.get_all_source_ids()
+        if str(event.chat_id) not in source_ids:
+            return
         msg = event.message
-        source_id = event.chat_id
-
-        # Album / media group handling
         if msg.grouped_id:
             gid = msg.grouped_id
-            _album_buffer[gid].append(msg)
-            # Cancel existing timer and restart (debounce)
-            old_task = _album_timers.get(gid)
-            if old_task:
-                old_task.cancel()
-            _album_timers[gid] = asyncio.ensure_future(
-                flush_album(gid, source_id)
+            _album_buf[gid].append(msg)
+            old = _album_tasks.get(gid)
+            if old:
+                old.cancel()
+            _album_tasks[gid] = asyncio.ensure_future(
+                _flush_album(gid, event.chat_id)
             )
+        else:
+            await _forward_messages([msg], event.chat_id)
+
+    # ── Event: Message edited ─────────────────────────────────────────────────
+
+    @client.on(events.MessageEdited())
+    async def on_edit(event):
+        source_ids = await db.get_all_source_ids()
+        if str(event.chat_id) not in source_ids:
             return
 
-        # Single message
-        await do_forward([msg], source_id)
+        msg = event.message
+        raw = getattr(msg, "text", "") or getattr(msg, "message", "") or ""
+        if not raw:
+            return  # media-only edit — can't replicate
 
-    # ── Register Telethon event handlers ──────────────────────────────────
+        modified = await _process(raw)
+        targets = await db.get_mapped_targets(event.chat_id, msg.id)
 
-    @client.on(events.NewMessage(chats=source_ids))
-    async def on_new_message(event):
-        await handle_message_event(event, is_edit=False)
+        for t in targets:
+            target = resolve_chat_id(t["target_chat_id"])
+            try:
+                await client.edit_message(target, t["target_msg_id"], text=modified)
+                logger.info(
+                    f"✏️  Edit synced: {event.chat_id}/{msg.id} → "
+                    f"{t['target_chat_id']}/{t['target_msg_id']}"
+                )
+            except (MessageNotModifiedError, MessageIdInvalidError):
+                pass
+            except Exception as e:
+                logger.error(f"❌ Edit sync failed: {e}")
 
-    @client.on(events.MessageEdited(chats=source_ids))
-    async def on_edited_message(event):
-        # Re-forward edited messages (appears as a new message in target)
-        await handle_message_event(event, is_edit=True)
+    # ── Event: Message deleted ────────────────────────────────────────────────
 
-    # ── Start the client ──────────────────────────────────────────────────
+    @client.on(events.MessageDeleted())
+    async def on_delete(event):
+        if not event.chat_id:
+            return
+        source_ids = await db.get_all_source_ids()
+        if str(event.chat_id) not in source_ids:
+            return
 
-    if config.SESSION_STRING:
-        await client.start()
-    else:
-        # First-time local login — will prompt for phone + OTP
-        await client.start(phone=config.PHONE)
-        session_str = client.session.save()
-        print("\n" + "=" * 60)
-        print("📋  SESSION_STRING — copy this into Koyeb env vars:")
-        print("=" * 60)
-        print(session_str)
-        print("=" * 60 + "\n")
-        logger.info("SESSION_STRING printed above. Set it as SESSION_STRING in Koyeb.")
+        for msg_id in event.deleted_ids:
+            targets = await db.get_mapped_targets(event.chat_id, msg_id)
+            for t in targets:
+                target = resolve_chat_id(t["target_chat_id"])
+                try:
+                    await client.delete_messages(target, t["target_msg_id"])
+                    logger.info(
+                        f"🗑️  Delete synced: {event.chat_id}/{msg_id} → "
+                        f"{t['target_chat_id']}/{t['target_msg_id']}"
+                    )
+                except Exception as e:
+                    logger.error(f"❌ Delete sync failed: {e}")
+
+    # ── Start ─────────────────────────────────────────────────────────────────
+
+    if not client.is_connected():
+        if config.SESSION_STRING:
+            await client.start()
+        else:
+            await client.start(phone=config.PHONE)
+            ss = client.session.save()
+            print("\n" + "=" * 60)
+            print("📋  SESSION_STRING — paste into Koyeb env vars:")
+            print("=" * 60)
+            print(ss)
+            print("=" * 60 + "\n")
 
     me = await client.get_me()
+    source_count = len(await db.get_all_source_ids())
     logger.info(
-        f"🤖 Logged in as: {me.first_name} "
-        f"(@{me.username or 'no_username'}) | ID: {me.id}"
+        f"🤖 Userbot logged in as {me.first_name} "
+        f"(@{me.username or 'N/A'}) | ID: {me.id}"
     )
-    logger.info(
-        f"🚀 Userbot running | "
-        f"Watching {len(source_ids)} source(s) | "
-        f"Rules: {len(rules.rules)}"
-    )
+    logger.info(f"🚀 Userbot running | Sources in DB: {source_count}")
 
     await client.run_until_disconnected()
