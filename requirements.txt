@@ -1,3 +1,5 @@
 telethon>=1.36.0
 python-telegram-bot>=21.0
 python-dotenv>=1.0.0
+motor>=3.3.0
+pymongo>=4.6.0

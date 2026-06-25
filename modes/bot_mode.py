@@ -1,119 +1,148 @@
-"""Bot mode using python-telegram-bot (PTB v21+).
+"""
+modes/bot_mode.py — Bot API forwarding mode (python-telegram-bot).
 
-Classic bot approach: the bot must be a member of source channels
-and an admin with post permission in target channels.
-Uses copyMessage (Bot API) for silent forwarding without "Forwarded From".
+Registers channel-post handlers on a shared PTB Application.
+The bot must be a MEMBER of source channels and ADMIN in target channels.
+
+Supports:
+  • Silent copy (no "Forwarded From" header)
+  • Word replacement, prefix/suffix on text/captions
+  • Edit sync for text/caption edits (Bot API supports this)
+  • Delete sync: NOT possible via Bot API
+  • Maintenance mode pause
 """
 import logging
 
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
-from forwarder import ForwardRules
+from forwarder import apply_text_processing, resolve_chat_id, should_skip
 
 logger = logging.getLogger(__name__)
 
 
-def run_bot(config):
-    """Start the bot in polling mode (blocking)."""
-    rules = ForwardRules(config.FORWARD_RULES_RAW, config.SKIP_TERMS_RAW)
+def register_handlers(app: Application, config, db):
+    """Attach channel-post forwarding handlers to the given Application."""
 
-    # ── Command handlers ──────────────────────────────────────────────────
+    # ── Text processing helpers ───────────────────────────────────────────────
 
-    async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = (
-            "✅ *Common Thread Auto Forward Bot is running!*\n\n"
-            "This bot silently forwards messages between channels "
-            "with no 'Forwarded From' header.\n\n"
-            f"📋 *Rules loaded:* {len(rules.rules)}\n"
-            f"🚫 *Skip terms:* {len(rules.skip_terms)}\n"
-            f"🔁 *Mode:* Bot API\n\n"
-            "_Make sure the bot is a member of source channels "
-            "and admin in target channels._"
-        )
-        await update.effective_message.reply_text(text, parse_mode="Markdown")
+    async def _process(text: str) -> str:
+        replacements = await db.get_replacements()
+        prefix = await db.get_config("prefix", "")
+        suffix = await db.get_config("suffix", "")
+        return apply_text_processing(text, replacements, prefix, suffix)
 
-    async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        sources = rules.get_all_sources()
-        text = (
-            "📊 *Bot Status*\n\n"
-            f"✅ Running\n"
-            f"📋 Rules: {len(rules.rules)}\n"
-            f"📡 Sources: {len(sources)}\n"
-            f"🚫 Skip terms: {len(rules.skip_terms)}\n"
-            f"🔑 Token: {'Set ✅' if config.BOT_TOKEN else 'Missing ❌'}\n"
-            f"🔁 Mode: Bot API"
-        )
-        await update.effective_message.reply_text(text, parse_mode="Markdown")
+    # ── New channel post ──────────────────────────────────────────────────────
 
-    # ── Channel post handler ──────────────────────────────────────────────
-
-    async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # PTB routes both channel_post and edited_channel_post through MessageHandler
-        post = update.channel_post or update.edited_channel_post
+    async def handle_channel_post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        post = update.channel_post
         if not post:
             return
 
-        source_id = str(post.chat.id)
-        targets = rules.get_targets(source_id)
+        # Maintenance mode
+        if await db.get_config("maintenance", "false") == "true":
+            return
 
+        source_id = str(post.chat.id)
+        targets = await db.get_targets_for_source(source_id)
         if not targets:
             return
 
-        text = post.text or ""
-        caption = post.caption or ""
-
-        if rules.should_skip(text, caption):
+        # Skip check
+        skip_terms = await db.get_skip_terms()
+        if should_skip(post.text or "", post.caption or "", skip_terms):
             logger.info(f"⏭️  Skipped msg {post.message_id} from {source_id}")
             return
 
         for target_raw in targets:
-            target = rules.resolve_chat_id(target_raw)
+            target = resolve_chat_id(target_raw)
             try:
-                await context.bot.copy_message(
+                sent = await ctx.bot.copy_message(
                     chat_id=target,
                     from_chat_id=source_id,
                     message_id=post.message_id,
                 )
-                logger.info(
-                    f"✅ Copied msg {post.message_id}: {source_id} → {target_raw}"
-                )
+                # Store mapping for edit sync
+                await db.store_message_map(source_id, post.message_id, target_raw, sent.message_id)
+
+                # Apply text modifications by editing the copied message
+                replacements = await db.get_replacements()
+                prefix = await db.get_config("prefix", "")
+                suffix = await db.get_config("suffix", "")
+                needs_edit = bool(replacements or prefix or suffix)
+
+                if needs_edit:
+                    raw = post.text or post.caption or ""
+                    if raw:
+                        modified = apply_text_processing(raw, replacements, prefix, suffix)
+                        if modified != raw:
+                            try:
+                                if post.text:
+                                    await ctx.bot.edit_message_text(
+                                        chat_id=target,
+                                        message_id=sent.message_id,
+                                        text=modified,
+                                    )
+                                elif post.caption:
+                                    await ctx.bot.edit_message_caption(
+                                        chat_id=target,
+                                        message_id=sent.message_id,
+                                        caption=modified,
+                                    )
+                            except Exception as edit_err:
+                                logger.warning(f"Text modification failed: {edit_err}")
+
+                logger.info(f"✅ Copied msg {post.message_id}: {source_id} → {target_raw}")
+
             except Exception as e:
                 logger.error(f"❌ Failed to copy to {target_raw}: {e}")
 
-    # ── Build and run the PTB Application ────────────────────────────────
+    # ── Edited channel post ───────────────────────────────────────────────────
 
-    app = (
-        Application.builder()
-        .token(config.BOT_TOKEN)
-        .build()
-    )
+    async def handle_edited_channel_post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        post = update.edited_channel_post
+        if not post:
+            return
 
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("status", status_command))
+        # Get mapped target messages
+        targets = await db.get_mapped_targets(post.chat.id, post.message_id)
+        if not targets:
+            return
 
-    # Channel posts (new + edited) — ChatType.CHANNEL covers both update types
+        raw = post.text or post.caption or ""
+        modified = await _process(raw) if raw else ""
+
+        for t in targets:
+            target = resolve_chat_id(t["target_chat_id"])
+            try:
+                if post.text and modified:
+                    await ctx.bot.edit_message_text(
+                        chat_id=target,
+                        message_id=t["target_msg_id"],
+                        text=modified,
+                    )
+                elif post.caption is not None:
+                    await ctx.bot.edit_message_caption(
+                        chat_id=target,
+                        message_id=t["target_msg_id"],
+                        caption=modified,
+                    )
+                logger.info(
+                    f"✏️  Edit synced: {post.chat.id}/{post.message_id} → "
+                    f"{t['target_chat_id']}/{t['target_msg_id']}"
+                )
+            except Exception as e:
+                logger.error(f"❌ Edit sync error → {t['target_chat_id']}: {e}")
+
+    # ── Register ──────────────────────────────────────────────────────────────
+
     app.add_handler(
-        MessageHandler(
-            filters.ChatType.CHANNEL,
-            handle_channel_post,
-        )
+        MessageHandler(filters.ChatType.CHANNEL & ~filters.UpdateType.EDITED_CHANNEL_POST,
+                       handle_channel_post)
+    )
+    app.add_handler(
+        MessageHandler(filters.UpdateType.EDITED_CHANNEL_POST,
+                       handle_edited_channel_post)
     )
 
-    logger.info(
-        f"🤖 Bot mode starting (polling) | "
-        f"Rules: {len(rules.rules)} | "
-        f"Sources: {len(rules.get_all_sources())}"
-    )
-    logger.info(
-        "⚠️  Reminder: Bot must be a MEMBER of source channels "
-        "and ADMIN in target channels."
-    )
-
-    app.run_polling(drop_pending_updates=True)
+    logger.info("✅ Bot forwarding handlers registered")
