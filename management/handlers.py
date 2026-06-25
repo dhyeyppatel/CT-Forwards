@@ -50,6 +50,10 @@ END = ConversationHandler.END
 # ── Parse mode constant ───────────────────────────────────────────────────────
 HTML = "HTML"
 
+# ── Chat name cache (chat_id str → display name str) ────────────────────────
+# Populated lazily via bot.get_chat(); persists for the process lifetime.
+_chat_name_cache: dict[str, str] = {}
+
 
 # ── Keyboard builders ─────────────────────────────────────────────────────────
 
@@ -103,6 +107,22 @@ def register_handlers(app: Application, config, db):
     def _h(s: str) -> str:
         """Escape a string for safe use inside HTML text."""
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    async def _resolve_name(bot, chat_id: str) -> str:
+        """Return the chat title for a given chat_id, falling back to the raw ID.
+
+        Results are cached in _chat_name_cache for the lifetime of the process
+        so repeated menu opens don't hammer the Telegram API.
+        """
+        if chat_id in _chat_name_cache:
+            return _chat_name_cache[chat_id]
+        try:
+            chat = await bot.get_chat(int(chat_id))
+            name = chat.title or chat.username or chat_id
+        except Exception:
+            name = chat_id  # bot not in chat or invalid ID — show raw
+        _chat_name_cache[chat_id] = name
+        return name
 
     async def _status_text() -> str:
         rules = await db.get_rules()
@@ -189,11 +209,15 @@ def register_handlers(app: Application, config, db):
         rules = await db.get_rules()
         lines = [f"📋 <b>Forward Rules ({len(rules)})</b>\n{'─' * 28}"]
         for i, r in enumerate(rules, 1):
-            tgts = "\n".join(f"    ➔ <code>{_h(t)}</code>" for t in r["target_ids"])
+            src_name = await _resolve_name(ctx.bot, r["source_id"])
+            tgt_lines = []
+            for t in r["target_ids"]:
+                tgt_name = await _resolve_name(ctx.bot, t)
+                tgt_lines.append(f"    ➔ <b>{_h(tgt_name)}</b> <code>({_h(t)})</code>")
             lines.append(
                 f"<b>Rule {i}</b>\n"
-                f"  📥 Source: <code>{_h(r['source_id'])}</code>\n"
-                f"{tgts}"
+                f"  📥 <b>{_h(src_name)}</b> <code>({_h(r['source_id'])})</code>\n"
+                + "\n".join(tgt_lines)
             )
         if not rules:
             lines.append("<i>No rules configured yet.</i>")
