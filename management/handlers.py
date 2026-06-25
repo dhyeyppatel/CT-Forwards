@@ -188,18 +188,22 @@ def register_handlers(app: Application, config, db):
     async def show_rules_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rules = await db.get_rules()
         lines = [f"📋 <b>Forward Rules ({len(rules)})</b>\n{'─' * 28}"]
-        for r in rules:
-            tgts = ", ".join(f"<code>{_h(t)}</code>" for t in r["target_ids"])
-            lines.append(f"<b>#{_h(str(r['id']))}</b> <code>{_h(r['source_id'])}</code>\n    ➔ {tgts}")
+        for i, r in enumerate(rules, 1):
+            tgts = "\n".join(f"    ➔ <code>{_h(t)}</code>" for t in r["target_ids"])
+            lines.append(
+                f"<b>Rule {i}</b>\n"
+                f"  📥 Source: <code>{_h(r['source_id'])}</code>\n"
+                f"{tgts}"
+            )
         if not rules:
             lines.append("<i>No rules configured yet.</i>")
 
         buttons = [[InlineKeyboardButton("➕ Add Rule", callback_data="rules_add")]]
         if rules:
             row: list = []
-            for r in rules:
+            for i, r in enumerate(rules, 1):
                 row.append(
-                    InlineKeyboardButton(f"🗑️ #{r['id']}", callback_data=f"rules_del:{r['id']}")
+                    InlineKeyboardButton(f"🗑️ Rule {i}", callback_data=f"rules_del:{r['id']}")
                 )
                 if len(row) == 3:
                     buttons.append(row)
@@ -265,19 +269,19 @@ def register_handlers(app: Application, config, db):
     async def show_skip_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         terms = await db.get_skip_terms()
         lines = [f"🚫 <b>Skip Terms ({len(terms)})</b>\n{'─' * 28}"]
-        for t in terms:
-            lines.append(f"<b>#{_h(str(t['id']))}</b> <code>{_h(t['term'])}</code>")
+        for i, t in enumerate(terms, 1):
+            lines.append(f"<b>{i}.</b> <code>{_h(t['term'])}</code>")
         if not terms:
             lines.append("<i>No skip terms configured.</i>")
 
         buttons = [[InlineKeyboardButton("➕ Add Term", callback_data="skip_add")]]
         if terms:
             row: list = []
-            for t in terms:
+            for i, t in enumerate(terms, 1):
                 row.append(
-                    InlineKeyboardButton(f"🗑️ #{t['id']}", callback_data=f"skip_del:{t['id']}")
+                    InlineKeyboardButton(f"🗑️ {i}. {t['term'][:12]}", callback_data=f"skip_del:{t['id']}")
                 )
-                if len(row) == 4:
+                if len(row) == 3:
                     buttons.append(row)
                     row = []
             if row:
@@ -325,20 +329,20 @@ def register_handlers(app: Application, config, db):
     async def show_replace_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         repls = await db.get_replacements()
         lines = [f"🔄 <b>Word Replacements ({len(repls)})</b>\n{'─' * 28}"]
-        for r in repls:
+        for i, r in enumerate(repls, 1):
             to = f"<code>{_h(r['to_word'])}</code>" if r["to_word"] else "<i>(deleted)</i>"
-            lines.append(f"<b>#{_h(str(r['id']))}</b> <code>{_h(r['from_word'])}</code> ➔ {to}")
+            lines.append(f"<b>{i}.</b> <code>{_h(r['from_word'])}</code> ➔ {to}")
         if not repls:
             lines.append("<i>No replacements configured.</i>")
 
         buttons = [[InlineKeyboardButton("➕ Add Replacement", callback_data="replace_add")]]
         if repls:
             row: list = []
-            for r in repls:
+            for i, r in enumerate(repls, 1):
                 row.append(
-                    InlineKeyboardButton(f"🗑️ #{r['id']}", callback_data=f"replace_del:{r['id']}")
+                    InlineKeyboardButton(f"🗑️ {i}. {r['from_word'][:10]}", callback_data=f"replace_del:{r['id']}")
                 )
-                if len(row) == 4:
+                if len(row) == 3:
                     buttons.append(row)
                     row = []
             if row:
