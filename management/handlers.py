@@ -12,8 +12,10 @@ Menus
 🚫 Skip Terms    → list, add, delete
 🔄 Replace Words → list, add (find → replace), delete
 📝 Text Append   → set/clear prefix and suffix per message
-🔒 Maintenance   → toggle forwarding pause
+🔒 Maintenance   → toggle (restricts bot UI for non-admins, forwarding still works)
 📊 Status        → live summary
+
+Note: All messages use HTML parse mode to avoid Telegram MarkdownV1 parse errors.
 """
 
 import logging
@@ -45,11 +47,14 @@ logger = logging.getLogger(__name__)
 
 END = ConversationHandler.END
 
+# ── Parse mode constant ───────────────────────────────────────────────────────
+HTML = "HTML"
+
 
 # ── Keyboard builders ─────────────────────────────────────────────────────────
 
 def _kb(*rows):
-    """Shorthand to build an InlineKeyboardMarkup from rows of (text, data) pairs."""
+    """Build InlineKeyboardMarkup from rows of (text, callback_data) pairs."""
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(t, callback_data=d) for t, d in row] for row in rows]
     )
@@ -64,10 +69,6 @@ def _main_kb():
     )
 
 
-def _back_kb(dest="main_menu"):
-    return _kb([(("◀️ Back" if dest != "main_menu" else "◀️ Main Menu"), dest)])
-
-
 # ── Register function (called from main.py) ───────────────────────────────────
 
 def register_handlers(app: Application, config, db):
@@ -78,7 +79,7 @@ def register_handlers(app: Application, config, db):
     # ── Auth guard ────────────────────────────────────────────────────────────
 
     def admin_only(func):
-        """Decorator: silently ignore non-admin interactions."""
+        """Decorator: reject non-admin interactions gracefully."""
         @wraps(func)
         async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             uid = update.effective_user.id if update.effective_user else None
@@ -99,6 +100,10 @@ def register_handlers(app: Application, config, db):
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    def _h(s: str) -> str:
+        """Escape a string for safe use inside HTML text."""
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
     async def _status_text() -> str:
         rules = await db.get_rules()
         skip = await db.get_skip_terms()
@@ -108,32 +113,32 @@ def register_handlers(app: Application, config, db):
         prefix = await db.get_config("prefix", "")
         suffix = await db.get_config("suffix", "")
         mode_icon = {"userbot": "🤖", "bot": "🔑", "both": "🔄"}.get(mode, "❓")
-        maint_txt = "🔴 ON (forwarding paused)" if maint == "true" else "🟢 OFF"
+        maint_txt = "🔴 ON" if maint == "true" else "🟢 OFF"
         return (
-            "📊 *Common Thread Auto Forward Bot*\n"
+            "📊 <b>Common Thread Auto Forward Bot</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{mode_icon} *Mode:* `{mode}`\n"
-            f"📋 *Rules:* `{len(rules)}`\n"
-            f"🚫 *Skip terms:* `{len(skip)}`\n"
-            f"🔄 *Replacements:* `{len(repl)}`\n"
-            f"📌 *Prefix:* `{'set' if prefix else 'none'}`\n"
-            f"📌 *Suffix:* `{'set' if suffix else 'none'}`\n"
-            f"🔒 *Maintenance:* {maint_txt}"
+            f"{mode_icon} <b>Mode:</b> <code>{_h(mode)}</code>\n"
+            f"📋 <b>Rules:</b> <code>{len(rules)}</code>\n"
+            f"🚫 <b>Skip terms:</b> <code>{len(skip)}</code>\n"
+            f"🔄 <b>Replacements:</b> <code>{len(repl)}</code>\n"
+            f"📌 <b>Prefix:</b> <code>{'set' if prefix else 'none'}</code>\n"
+            f"📌 <b>Suffix:</b> <code>{'set' if suffix else 'none'}</code>\n"
+            f"🔒 <b>Maintenance:</b> {maint_txt}"
         )
 
-    async def _edit_or_reply(update: Update, text: str, kb=None, parse_mode="Markdown"):
-        """Edit existing message if callback, else send new message."""
+    async def _edit_or_reply(update: Update, text: str, kb=None):
+        """Edit existing message if callback, else send new message (always HTML)."""
         if update.callback_query:
             await update.callback_query.answer()
             try:
                 await update.callback_query.edit_message_text(
-                    text, reply_markup=kb, parse_mode=parse_mode
+                    text, reply_markup=kb, parse_mode=HTML
                 )
             except Exception:
                 pass
         else:
             await update.effective_message.reply_text(
-                text, reply_markup=kb, parse_mode=parse_mode
+                text, reply_markup=kb, parse_mode=HTML
             )
 
     # ── Main menu ─────────────────────────────────────────────────────────────
@@ -163,12 +168,12 @@ def register_handlers(app: Application, config, db):
             [(f"🔄 {lbl('both')}", "mode_set:both")],
             [("◀️ Back", "main_menu")],
         )
-        await _edit_or_reply(
-            update,
-            f"⚙️ *Mode Settings*\n\nCurrent: `{current}`\n\n"
-            "_Note: mode change takes effect on next restart._",
-            kb,
+        text = (
+            f"⚙️ <b>Mode Settings</b>\n\n"
+            f"Current: <code>{_h(current)}</code>\n\n"
+            f"<i>Note: mode change takes effect on next restart.</i>"
         )
+        await _edit_or_reply(update, text, kb)
 
     @admin_only
     async def set_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -182,12 +187,12 @@ def register_handlers(app: Application, config, db):
     @admin_only
     async def show_rules_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rules = await db.get_rules()
-        lines = [f"📋 *Forward Rules* ({len(rules)})\n{'─' * 28}"]
+        lines = [f"📋 <b>Forward Rules ({len(rules)})</b>\n{'─' * 28}"]
         for r in rules:
-            tgts = ", ".join(f"`{t}`" for t in r["target_ids"])
-            lines.append(f"*#{r['id']}* `{r['source_id']}`\n    → {tgts}")
+            tgts = ", ".join(f"<code>{_h(t)}</code>" for t in r["target_ids"])
+            lines.append(f"<b>#{_h(str(r['id']))}</b> <code>{_h(r['source_id'])}</code>\n    ➔ {tgts}")
         if not rules:
-            lines.append("_No rules configured yet._")
+            lines.append("<i>No rules configured yet.</i>")
 
         buttons = [[InlineKeyboardButton("➕ Add Rule", callback_data="rules_add")]]
         if rules:
@@ -203,29 +208,24 @@ def register_handlers(app: Application, config, db):
                 buttons.append(row)
         buttons.append([InlineKeyboardButton("◀️ Back", callback_data="main_menu")])
 
-        await _edit_or_reply(
-            update,
-            "\n".join(lines),
-            InlineKeyboardMarkup(buttons),
-        )
+        await _edit_or_reply(update, "\n".join(lines), InlineKeyboardMarkup(buttons))
 
     @admin_only
     async def delete_rule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        rid = int(update.callback_query.data.split(":")[1])
+        rid = update.callback_query.data.split(":")[1]
         await db.delete_rule(rid)
         await update.callback_query.answer("🗑️ Rule deleted")
         await show_rules_menu(update, ctx)
 
-    # Add-rule conversation entry
     @admin_only
     async def start_add_rule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(
-            "📋 *Add Forward Rule — Step 1 of 2*\n\n"
-            "Send the *SOURCE* channel ID:\n"
-            "_(e.g. `-1001234567890`)_\n\n"
+            "📋 <b>Add Forward Rule — Step 1 of 2</b>\n\n"
+            "Send the <b>SOURCE</b> channel ID:\n"
+            "<i>(e.g. -1001234567890)</i>\n\n"
             "Use /cancel to abort.",
-            parse_mode="Markdown",
+            parse_mode=HTML,
         )
         return WAIT_RULE_SOURCE
 
@@ -234,11 +234,11 @@ def register_handlers(app: Application, config, db):
             return END
         ctx.user_data["rule_source"] = update.message.text.strip()
         await update.message.reply_text(
-            f"✅ Source: `{ctx.user_data['rule_source']}`\n\n"
-            "*Step 2 of 2* — Send the *TARGET* channel ID(s):\n"
-            "_(Comma-separated for multiple, e.g. `-1002222,-1003333`)_\n\n"
+            f"✅ Source: <code>{_h(ctx.user_data['rule_source'])}</code>\n\n"
+            "<b>Step 2 of 2</b> — Send the <b>TARGET</b> channel ID(s):\n"
+            "<i>Comma-separated for multiple: -1002222,-1003333</i>\n\n"
             "Use /cancel to abort.",
-            parse_mode="Markdown",
+            parse_mode=HTML,
         )
         return WAIT_RULE_TARGET
 
@@ -251,12 +251,11 @@ def register_handlers(app: Application, config, db):
             return WAIT_RULE_TARGET
         source = ctx.user_data.pop("rule_source", "?")
         await db.add_rule(source, targets)
-        tgts_str = ", ".join(f"`{t}`" for t in targets)
+        tgts_str = ", ".join(f"<code>{_h(t)}</code>" for t in targets)
         kb = _kb([("📋 View Rules", "menu_rules"), ("◀️ Menu", "main_menu")])
         await update.message.reply_text(
-            f"✅ *Rule added!*\n\n`{source}` → {tgts_str}",
-            reply_markup=kb,
-            parse_mode="Markdown",
+            f"✅ <b>Rule added!</b>\n\n<code>{_h(source)}</code> ➔ {tgts_str}",
+            reply_markup=kb, parse_mode=HTML,
         )
         return END
 
@@ -265,11 +264,11 @@ def register_handlers(app: Application, config, db):
     @admin_only
     async def show_skip_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         terms = await db.get_skip_terms()
-        lines = [f"🚫 *Skip Terms* ({len(terms)})\n{'─' * 28}"]
+        lines = [f"🚫 <b>Skip Terms ({len(terms)})</b>\n{'─' * 28}"]
         for t in terms:
-            lines.append(f"*#{t['id']}* `{t['term']}`")
+            lines.append(f"<b>#{_h(str(t['id']))}</b> <code>{_h(t['term'])}</code>")
         if not terms:
-            lines.append("_No skip terms configured._")
+            lines.append("<i>No skip terms configured.</i>")
 
         buttons = [[InlineKeyboardButton("➕ Add Term", callback_data="skip_add")]]
         if terms:
@@ -289,7 +288,7 @@ def register_handlers(app: Application, config, db):
 
     @admin_only
     async def delete_skip_term(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        tid = int(update.callback_query.data.split(":")[1])
+        tid = update.callback_query.data.split(":")[1]
         await db.delete_skip_term(tid)
         await update.callback_query.answer("🗑️ Skip term removed")
         await show_skip_menu(update, ctx)
@@ -298,11 +297,11 @@ def register_handlers(app: Application, config, db):
     async def start_add_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(
-            "🚫 *Add Skip Term*\n\n"
+            "🚫 <b>Add Skip Term</b>\n\n"
             "Send the word or phrase to filter:\n"
-            "_(Messages containing this will not be forwarded)_\n\n"
+            "<i>Messages containing this will not be forwarded.</i>\n\n"
             "Use /cancel to abort.",
-            parse_mode="Markdown",
+            parse_mode=HTML,
         )
         return WAIT_SKIP_TERM
 
@@ -313,11 +312,11 @@ def register_handlers(app: Application, config, db):
         added = await db.add_skip_term(term)
         kb = _kb([("🚫 Skip Terms", "menu_skip"), ("◀️ Menu", "main_menu")])
         msg = (
-            f"✅ Skip term added: `{term}`"
+            f"✅ Skip term added: <code>{_h(term)}</code>"
             if added
-            else f"⚠️ `{term}` already exists."
+            else f"⚠️ <code>{_h(term)}</code> already exists."
         )
-        await update.message.reply_text(msg, reply_markup=kb, parse_mode="Markdown")
+        await update.message.reply_text(msg, reply_markup=kb, parse_mode=HTML)
         return END
 
     # ── Replace Words ─────────────────────────────────────────────────────────
@@ -325,12 +324,12 @@ def register_handlers(app: Application, config, db):
     @admin_only
     async def show_replace_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         repls = await db.get_replacements()
-        lines = [f"🔄 *Word Replacements* ({len(repls)})\n{'─' * 28}"]
+        lines = [f"🔄 <b>Word Replacements ({len(repls)})</b>\n{'─' * 28}"]
         for r in repls:
-            to = r["to_word"] if r["to_word"] else "_(empty)_"
-            lines.append(f"*#{r['id']}* `{r['from_word']}` → `{to}`")
+            to = f"<code>{_h(r['to_word'])}</code>" if r["to_word"] else "<i>(deleted)</i>"
+            lines.append(f"<b>#{_h(str(r['id']))}</b> <code>{_h(r['from_word'])}</code> ➔ {to}")
         if not repls:
-            lines.append("_No replacements configured._")
+            lines.append("<i>No replacements configured.</i>")
 
         buttons = [[InlineKeyboardButton("➕ Add Replacement", callback_data="replace_add")]]
         if repls:
@@ -350,7 +349,7 @@ def register_handlers(app: Application, config, db):
 
     @admin_only
     async def delete_replacement(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        rid = int(update.callback_query.data.split(":")[1])
+        rid = update.callback_query.data.split(":")[1]
         await db.delete_replacement(rid)
         await update.callback_query.answer("🗑️ Replacement removed")
         await show_replace_menu(update, ctx)
@@ -359,11 +358,11 @@ def register_handlers(app: Application, config, db):
     async def start_add_replace(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(
-            "🔄 *Add Word Replacement — Step 1 of 2*\n\n"
-            "Send the word/phrase to *find* in messages:\n"
-            "_(e.g. `Join @old_channel`)_\n\n"
+            "🔄 <b>Add Word Replacement — Step 1 of 2</b>\n\n"
+            "Send the word/phrase to <b>find</b> in messages:\n"
+            "<i>Example: Join @old_channel</i>\n\n"
             "Use /cancel to abort.",
-            parse_mode="Markdown",
+            parse_mode=HTML,
         )
         return WAIT_REPLACE_FROM
 
@@ -372,12 +371,12 @@ def register_handlers(app: Application, config, db):
             return END
         ctx.user_data["replace_from"] = update.message.text.strip()
         await update.message.reply_text(
-            f"✅ Will find: `{ctx.user_data['replace_from']}`\n\n"
-            "*Step 2 of 2* — Send the *replacement* text:\n"
-            "_(e.g. `Join @new_channel`)_\n"
-            "_Send a single dash `-` to delete the word entirely._\n\n"
+            f"✅ Will find: <code>{_h(ctx.user_data['replace_from'])}</code>\n\n"
+            "<b>Step 2 of 2</b> — Send the <b>replacement</b> text:\n"
+            "<i>Example: Join @new_channel</i>\n"
+            "<i>Send a single dash (-) to delete the word entirely.</i>\n\n"
             "Use /cancel to abort.",
-            parse_mode="Markdown",
+            parse_mode=HTML,
         )
         return WAIT_REPLACE_TO
 
@@ -390,11 +389,10 @@ def register_handlers(app: Application, config, db):
             to_word = ""
         await db.add_replacement(from_word, to_word)
         kb = _kb([("🔄 Replacements", "menu_replace"), ("◀️ Menu", "main_menu")])
-        to_display = f"`{to_word}`" if to_word else "_(deleted)_"
+        to_display = f"<code>{_h(to_word)}</code>" if to_word else "<i>(deleted)</i>"
         await update.message.reply_text(
-            f"✅ *Replacement added!*\n\n`{from_word}` → {to_display}",
-            reply_markup=kb,
-            parse_mode="Markdown",
+            f"✅ <b>Replacement added!</b>\n\n<code>{_h(from_word)}</code> ➔ {to_display}",
+            reply_markup=kb, parse_mode=HTML,
         )
         return END
 
@@ -405,11 +403,12 @@ def register_handlers(app: Application, config, db):
         prefix = await db.get_config("prefix", "")
         suffix = await db.get_config("suffix", "")
         text = (
-            f"📝 *Text Append Settings*\n{'─' * 28}\n\n"
-            f"📌 *Prefix* _(added to start of every message)_:\n"
-            f"{f'```{prefix}```' if prefix else '_not set_'}\n\n"
-            f"📌 *Suffix* _(added to end of every message)_:\n"
-            f"{f'```{suffix}```' if suffix else '_not set_'}"
+            f"📝 <b>Text Append Settings</b>\n{'─' * 28}\n\n"
+            f"📌 <b>Prefix</b> <i>(added to start of every message)</i>:\n"
+            + (f"<pre>{_h(prefix)}</pre>" if prefix else "<i>not set</i>")
+            + "\n\n"
+            f"📌 <b>Suffix</b> <i>(added to end of every message)</i>:\n"
+            + (f"<pre>{_h(suffix)}</pre>" if suffix else "<i>not set</i>")
         )
         kb = _kb(
             [("✏️ Set Prefix", "append_set_prefix"), ("✏️ Set Suffix", "append_set_suffix")],
@@ -434,22 +433,22 @@ def register_handlers(app: Application, config, db):
     async def start_set_prefix(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(
-            "📝 *Set Prefix*\n\n"
-            "Send the text to add at the *top* of every forwarded message:\n\n"
+            "📝 <b>Set Prefix</b>\n\n"
+            "Send the text to add at the <b>top</b> of every forwarded message:\n\n"
             "Use /cancel to abort.",
-            parse_mode="Markdown",
+            parse_mode=HTML,
         )
         return WAIT_PREFIX
 
     async def receive_prefix(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in admin_ids:
             return END
-        await db.set_config("prefix", update.message.text.strip())
+        val = update.message.text.strip()
+        await db.set_config("prefix", val)
         kb = _kb([("📝 Text Settings", "menu_append"), ("◀️ Menu", "main_menu")])
         await update.message.reply_text(
-            f"✅ *Prefix set!*\n\n```{update.message.text.strip()}```",
-            reply_markup=kb,
-            parse_mode="Markdown",
+            f"✅ <b>Prefix set!</b>\n\n<pre>{_h(val)}</pre>",
+            reply_markup=kb, parse_mode=HTML,
         )
         return END
 
@@ -457,22 +456,22 @@ def register_handlers(app: Application, config, db):
     async def start_set_suffix(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(
-            "📝 *Set Suffix*\n\n"
-            "Send the text to add at the *bottom* of every forwarded message:\n\n"
+            "📝 <b>Set Suffix</b>\n\n"
+            "Send the text to add at the <b>bottom</b> of every forwarded message:\n\n"
             "Use /cancel to abort.",
-            parse_mode="Markdown",
+            parse_mode=HTML,
         )
         return WAIT_SUFFIX
 
     async def receive_suffix(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in admin_ids:
             return END
-        await db.set_config("suffix", update.message.text.strip())
+        val = update.message.text.strip()
+        await db.set_config("suffix", val)
         kb = _kb([("📝 Text Settings", "menu_append"), ("◀️ Menu", "main_menu")])
         await update.message.reply_text(
-            f"✅ *Suffix set!*\n\n```{update.message.text.strip()}```",
-            reply_markup=kb,
-            parse_mode="Markdown",
+            f"✅ <b>Suffix set!</b>\n\n<pre>{_h(val)}</pre>",
+            reply_markup=kb, parse_mode=HTML,
         )
         return END
 
@@ -483,11 +482,13 @@ def register_handlers(app: Application, config, db):
         maint = await db.get_config("maintenance", "false")
         is_on = maint == "true"
         text = (
-            f"🔒 *Maintenance Mode*\n{'─' * 28}\n\n"
-            + ("🔴 *ON* — Forwarding is currently *paused*.\n"
-               "_Non-admins see a maintenance notice._"
-               if is_on
-               else "🟢 *OFF* — Forwarding is *active*.")
+            f"🔒 <b>Maintenance Mode</b>\n{'─' * 28}\n\n"
+            + (
+                "🔴 <b>ON</b> — Non-admins see a maintenance notice when they interact with the bot.\n"
+                "<i>Forwarding continues normally. Only the management UI is restricted.</i>"
+                if is_on
+                else "🟢 <b>OFF</b> — Bot is fully open."
+            )
         )
         kb = _kb(
             [("🟢 Turn OFF" if is_on else "🔴 Turn ON", "maintenance_toggle")],
@@ -513,6 +514,11 @@ def register_handlers(app: Application, config, db):
             reply_markup=_kb([("◀️ Main Menu", "main_menu")]),
         )
         return END
+
+    # ── Global PTB error handler ──────────────────────────────────────────────
+
+    async def ptb_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+        logger.error("PTB handler exception:", exc_info=ctx.error)
 
     # ── Register all handlers ─────────────────────────────────────────────────
 
@@ -543,6 +549,9 @@ def register_handlers(app: Application, config, db):
         allow_reentry=True,
     )
 
+    # Error handler (eliminates "No error handlers registered" logs)
+    app.add_error_handler(ptb_error_handler)
+
     # Commands
     app.add_handler(CommandHandler("start",  show_main_menu))
     app.add_handler(CommandHandler("menu",   show_main_menu))
@@ -552,20 +561,20 @@ def register_handlers(app: Application, config, db):
     app.add_handler(conv)
 
     # Navigation callbacks
-    app.add_handler(CallbackQueryHandler(show_main_menu,       pattern="^main_menu$"))
-    app.add_handler(CallbackQueryHandler(show_status,          pattern="^menu_status$"))
-    app.add_handler(CallbackQueryHandler(show_mode_menu,       pattern="^menu_mode$"))
-    app.add_handler(CallbackQueryHandler(set_mode,             pattern="^mode_set:"))
-    app.add_handler(CallbackQueryHandler(show_rules_menu,      pattern="^menu_rules$"))
-    app.add_handler(CallbackQueryHandler(delete_rule,          pattern="^rules_del:"))
-    app.add_handler(CallbackQueryHandler(show_skip_menu,       pattern="^menu_skip$"))
-    app.add_handler(CallbackQueryHandler(delete_skip_term,     pattern="^skip_del:"))
-    app.add_handler(CallbackQueryHandler(show_replace_menu,    pattern="^menu_replace$"))
-    app.add_handler(CallbackQueryHandler(delete_replacement,   pattern="^replace_del:"))
-    app.add_handler(CallbackQueryHandler(show_append_menu,     pattern="^menu_append$"))
-    app.add_handler(CallbackQueryHandler(clear_prefix,         pattern="^append_clear_prefix$"))
-    app.add_handler(CallbackQueryHandler(clear_suffix,         pattern="^append_clear_suffix$"))
+    app.add_handler(CallbackQueryHandler(show_main_menu,        pattern="^main_menu$"))
+    app.add_handler(CallbackQueryHandler(show_status,           pattern="^menu_status$"))
+    app.add_handler(CallbackQueryHandler(show_mode_menu,        pattern="^menu_mode$"))
+    app.add_handler(CallbackQueryHandler(set_mode,              pattern="^mode_set:"))
+    app.add_handler(CallbackQueryHandler(show_rules_menu,       pattern="^menu_rules$"))
+    app.add_handler(CallbackQueryHandler(delete_rule,           pattern="^rules_del:"))
+    app.add_handler(CallbackQueryHandler(show_skip_menu,        pattern="^menu_skip$"))
+    app.add_handler(CallbackQueryHandler(delete_skip_term,      pattern="^skip_del:"))
+    app.add_handler(CallbackQueryHandler(show_replace_menu,     pattern="^menu_replace$"))
+    app.add_handler(CallbackQueryHandler(delete_replacement,    pattern="^replace_del:"))
+    app.add_handler(CallbackQueryHandler(show_append_menu,      pattern="^menu_append$"))
+    app.add_handler(CallbackQueryHandler(clear_prefix,          pattern="^append_clear_prefix$"))
+    app.add_handler(CallbackQueryHandler(clear_suffix,          pattern="^append_clear_suffix$"))
     app.add_handler(CallbackQueryHandler(show_maintenance_menu, pattern="^menu_maintenance$"))
-    app.add_handler(CallbackQueryHandler(toggle_maintenance,   pattern="^maintenance_toggle$"))
+    app.add_handler(CallbackQueryHandler(toggle_maintenance,    pattern="^maintenance_toggle$"))
 
     logger.info("✅ Management bot handlers registered")

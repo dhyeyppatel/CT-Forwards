@@ -62,10 +62,6 @@ async def run_userbot(config, db):
     # ── Forward a list of messages to all applicable targets ──────────────────
 
     async def _forward_messages(msgs: list, source_chat_id: int):
-        if await db.get_config("maintenance", "false") == "true":
-            logger.debug("⏸️  Maintenance mode: skipped forwarding")
-            return
-
         targets = await db.get_targets_for_source(source_chat_id)
         if not targets:
             return
@@ -108,13 +104,14 @@ async def run_userbot(config, db):
                             or getattr(src_msg, "message", "")
                             or ""
                         )
-                        if raw:
-                            modified = apply_text_processing(raw, replacements, prefix, suffix)
-                            if modified != raw:
-                                try:
-                                    await client.edit_message(target, tgt_msg, text=modified)
-                                except (MessageNotModifiedError, MessageIdInvalidError):
-                                    pass
+                        modified = apply_text_processing(raw, replacements, prefix, suffix)
+                        if modified != raw:
+                            try:
+                                await client.edit_message(target, tgt_msg, text=modified)
+                            except (MessageNotModifiedError, MessageIdInvalidError):
+                                pass
+                            except Exception as edit_err:
+                                logger.warning(f"⚠️  Text mod failed: {edit_err}")
 
                 logger.info(
                     f"✅ Forwarded {[m.id for m in msgs]} : {source_chat_id} → {target_raw}"

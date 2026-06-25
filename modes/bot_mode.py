@@ -39,9 +39,6 @@ def register_handlers(app: Application, config, db):
         if not post:
             return
 
-        # Maintenance mode
-        if await db.get_config("maintenance", "false") == "true":
-            return
 
         source_id = str(post.chat.id)
         targets = await db.get_targets_for_source(source_id)
@@ -73,24 +70,25 @@ def register_handlers(app: Application, config, db):
 
                 if needs_edit:
                     raw = post.text or post.caption or ""
-                    if raw:
-                        modified = apply_text_processing(raw, replacements, prefix, suffix)
-                        if modified != raw:
-                            try:
-                                if post.text:
-                                    await ctx.bot.edit_message_text(
-                                        chat_id=target,
-                                        message_id=sent.message_id,
-                                        text=modified,
-                                    )
-                                elif post.caption:
-                                    await ctx.bot.edit_message_caption(
-                                        chat_id=target,
-                                        message_id=sent.message_id,
-                                        caption=modified,
-                                    )
-                            except Exception as edit_err:
-                                logger.warning(f"Text modification failed: {edit_err}")
+                    modified = apply_text_processing(raw, replacements, prefix, suffix)
+                    if modified != raw:
+                        try:
+                            if post.text is not None:
+                                # Pure text message
+                                await ctx.bot.edit_message_text(
+                                    chat_id=target,
+                                    message_id=sent.message_id,
+                                    text=modified or " ",
+                                )
+                            else:
+                                # Media message — set/update caption
+                                await ctx.bot.edit_message_caption(
+                                    chat_id=target,
+                                    message_id=sent.message_id,
+                                    caption=modified,
+                                )
+                        except Exception as edit_err:
+                            logger.warning(f"Text modification failed: {edit_err}")
 
                 logger.info(f"✅ Copied msg {post.message_id}: {source_id} → {target_raw}")
 
