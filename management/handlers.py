@@ -75,8 +75,14 @@ def _main_kb():
 
 # ── Register function (called from main.py) ───────────────────────────────────
 
-def register_handlers(app: Application, config, db):
-    """Attach all management handlers to the given PTB Application."""
+def register_handlers(app: Application, config, db, telethon_client=None):
+    """Attach all management handlers to the given PTB Application.
+
+    Args:
+        telethon_client: Optional Telethon TelegramClient.  When provided,
+            the name resolver uses it as a fallback for channels the PTB bot
+            is not a member of (e.g. userbot-only private channels).
+    """
 
     admin_ids: set[int] = config.ADMIN_IDS
 
@@ -108,19 +114,53 @@ def register_handlers(app: Application, config, db):
         """Escape a string for safe use inside HTML text."""
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    async def _resolve_name(bot, chat_id: str) -> str:
-        """Return the chat title for a given chat_id, falling back to the raw ID.
+    def _fmt_chat(chat_id: str, name: str) -> str:
+        """Format a chat for display: name + ID, or username with globe icon."""
+        if str(chat_id).startswith("@"):
+            return f"🌐 <b>{_h(chat_id)}</b>"
+        if name != chat_id:          # resolved to a real name
+            return f"<b>{_h(name)}</b> <code>({_h(chat_id)})</code>"
+        return f"<code>{_h(chat_id)}</code>"  # fallback: raw ID only
 
-        Results are cached in _chat_name_cache for the lifetime of the process
-        so repeated menu opens don't hammer the Telegram API.
+    async def _resolve_name(bot, chat_id: str) -> str:
+        """Return a human-readable label for a chat_id or @username.
+
+        Resolution order:
+          1. In-memory cache (free)
+          2. @username  →  returned as-is; Telegram already knows it
+          3. PTB bot.get_chat()  →  works for channels the bot has joined
+          4. Telethon client.get_entity()  →  works for any channel the
+             userbot account is in (private/public)
+          5. Raw ID as final fallback
+
+        Results cached for process lifetime to avoid repeated API calls.
         """
         if chat_id in _chat_name_cache:
             return _chat_name_cache[chat_id]
+
+        # @username — no API call needed, just return it
+        if str(chat_id).startswith("@"):
+            _chat_name_cache[chat_id] = chat_id
+            return chat_id
+
+        name = None
+
+        # Try PTB bot first (works when bot is a member)
         try:
             chat = await bot.get_chat(int(chat_id))
-            name = chat.title or chat.username or chat_id
+            name = chat.title or chat.username or None
         except Exception:
-            name = chat_id  # bot not in chat or invalid ID — show raw
+            pass
+
+        # Fallback: Telethon userbot (works for any channel userbot has access to)
+        if name is None and telethon_client is not None:
+            try:
+                entity = await telethon_client.get_entity(int(chat_id))
+                name = getattr(entity, "title", None) or getattr(entity, "first_name", None)
+            except Exception:
+                pass
+
+        name = name or chat_id  # last resort: show raw ID
         _chat_name_cache[chat_id] = name
         return name
 
@@ -210,13 +250,14 @@ def register_handlers(app: Application, config, db):
         lines = [f"📋 <b>Forward Rules ({len(rules)})</b>\n{'─' * 28}"]
         for i, r in enumerate(rules, 1):
             src_name = await _resolve_name(ctx.bot, r["source_id"])
+            src_display = _fmt_chat(r["source_id"], src_name)
             tgt_lines = []
             for t in r["target_ids"]:
                 tgt_name = await _resolve_name(ctx.bot, t)
-                tgt_lines.append(f"    ➔ <b>{_h(tgt_name)}</b> <code>({_h(t)})</code>")
+                tgt_lines.append(f"    ➔ {_fmt_chat(t, tgt_name)}")
             lines.append(
                 f"<b>Rule {i}</b>\n"
-                f"  📥 <b>{_h(src_name)}</b> <code>({_h(r['source_id'])})</code>\n"
+                f"  📥 {src_display}\n"
                 + "\n".join(tgt_lines)
             )
         if not rules:
@@ -250,8 +291,9 @@ def register_handlers(app: Application, config, db):
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(
             "📋 <b>Add Forward Rule — Step 1 of 2</b>\n\n"
-            "Send the <b>SOURCE</b> channel ID:\n"
-            "<i>(e.g. -1001234567890)</i>\n\n"
+            "Send the <b>SOURCE</b> channel ID or username:\n"
+            "<i>• Numeric ID: -1001234567890</i>\n"
+            "<i>• Public username: @mychannel</i>\n\n"
             "Use /cancel to abort.",
             parse_mode=HTML,
         )
@@ -263,8 +305,10 @@ def register_handlers(app: Application, config, db):
         ctx.user_data["rule_source"] = update.message.text.strip()
         await update.message.reply_text(
             f"✅ Source: <code>{_h(ctx.user_data['rule_source'])}</code>\n\n"
-            "<b>Step 2 of 2</b> — Send the <b>TARGET</b> channel ID(s):\n"
-            "<i>Comma-separated for multiple: -1002222,-1003333</i>\n\n"
+            "<b>Step 2 of 2</b> — Send the <b>TARGET</b> channel ID(s) or username(s):\n"
+            "<i>• Comma-separated IDs: -1002222,-1003333</i>\n"
+            "<i>• Public usernames: @chan1,@chan2</i>\n"
+            "<i>• Mixed: -1002222,@chan2</i>\n\n"
             "Use /cancel to abort.",
             parse_mode=HTML,
         )

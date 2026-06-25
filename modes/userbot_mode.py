@@ -30,18 +30,26 @@ logger = logging.getLogger(__name__)
 ALBUM_WAIT_SECONDS = 1.5  # debounce window for media groups
 
 
-async def run_userbot(config, db):
-    """Start the Telethon userbot and run until disconnected."""
+async def run_userbot(config, db, client=None):
+    """Start the Telethon userbot and run until disconnected.
 
-    # Session
-    if config.SESSION_STRING:
-        session = StringSession(config.SESSION_STRING)
-        logger.info("🔑 Userbot: using SESSION_STRING")
+    Args:
+        client: Optional pre-built TelegramClient to reuse (shared with the
+                management panel for name lookups).  If None, a new client
+                is created from config credentials.
+    """
+
+    # Session / client setup
+    if client is None:
+        if config.SESSION_STRING:
+            session = StringSession(config.SESSION_STRING)
+            logger.info("🔑 Userbot: using SESSION_STRING (new client)")
+        else:
+            session = "userbot_session"
+            logger.info("🔑 Userbot: using local session file (new client)")
+        client = TelegramClient(session, config.API_ID, config.API_HASH)
     else:
-        session = "userbot_session"
-        logger.info("🔑 Userbot: using local session file")
-
-    client = TelegramClient(session, config.API_ID, config.API_HASH)
+        logger.info("🔑 Userbot: reusing shared TelegramClient")
 
     # Album buffers: grouped_id → list[Message]
     _album_buf: dict[int, list] = defaultdict(list)
@@ -219,16 +227,17 @@ async def run_userbot(config, db):
 
     # ── Start ─────────────────────────────────────────────────────────────────
 
-    if config.SESSION_STRING:
-        await client.start()
-    else:
-        await client.start(phone=config.PHONE)
-        ss = client.session.save()
-        print("\n" + "=" * 60)
-        print("📋  SESSION_STRING — paste into Koyeb env vars:")
-        print("=" * 60)
-        print(ss)
-        print("=" * 60 + "\n")
+    if not client.is_connected():
+        if config.SESSION_STRING:
+            await client.start()
+        else:
+            await client.start(phone=config.PHONE)
+            ss = client.session.save()
+            print("\n" + "=" * 60)
+            print("📋  SESSION_STRING — paste into Koyeb env vars:")
+            print("=" * 60)
+            print(ss)
+            print("=" * 60 + "\n")
 
     me = await client.get_me()
     source_count = len(await db.get_all_source_ids())

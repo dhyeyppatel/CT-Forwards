@@ -96,6 +96,18 @@ async def main():
 
     tasks: list = []
 
+    # ── Build Telethon client early so management panel can use it for name lookups
+    telethon_client = None
+    has_userbot_creds = bool(
+        config.API_ID and config.API_HASH and (config.SESSION_STRING or config.PHONE)
+    )
+    if mode in ("userbot", "both") and has_userbot_creds:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        session = StringSession(config.SESSION_STRING) if config.SESSION_STRING else "userbot_session"
+        telethon_client = TelegramClient(session, config.API_ID, config.API_HASH)
+        logger.info("🔑 Telethon client prepared for shared use")
+
     # ── PTB Application (management + optional bot forwarding) ────────────────
     if config.BOT_TOKEN:
         from telegram.ext import Application
@@ -104,8 +116,8 @@ async def main():
 
         ptb_app = Application.builder().token(config.BOT_TOKEN).build()
 
-        # Management panel always registered
-        reg_mgmt(ptb_app, config, db)
+        # Management panel always registered; share Telethon client for name resolution
+        reg_mgmt(ptb_app, config, db, telethon_client=telethon_client)
 
         # Bot-mode forwarding handlers registered when mode includes "bot"
         if mode in ("bot", "both"):
@@ -119,13 +131,9 @@ async def main():
         logger.warning("⚠️  BOT_TOKEN not set — management bot unavailable")
 
     # ── Telethon userbot ──────────────────────────────────────────────────────
-    has_userbot_creds = bool(
-        config.API_ID and config.API_HASH and (config.SESSION_STRING or config.PHONE)
-    )
-
-    if mode in ("userbot", "both") and has_userbot_creds:
+    if telethon_client is not None:
         from modes.userbot_mode import run_userbot
-        tasks.append(run_userbot(config, db))
+        tasks.append(run_userbot(config, db, client=telethon_client))
         logger.info("📡 Userbot forwarding: enabled")
     elif mode in ("userbot", "both") and not has_userbot_creds:
         logger.error(
