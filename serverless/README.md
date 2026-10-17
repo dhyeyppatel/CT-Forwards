@@ -125,9 +125,20 @@ https://your-app.vercel.app/api/setup
 ```
 This automatically registers `https://your-app.vercel.app/api/webhook` with Telegram and returns the registration status.
 
-### 4. Verify Cron Job
-Vercel reads `vercel.json` and automatically schedules `/api/cron` every minute.
-You can monitor invocations in the **Vercel Dashboard → Cron Jobs** tab.
+### 4. Setup 1-Minute Cron on cron-job.org (Free)
+Since Vercel Hobby accounts limit native cron expressions to once daily, use a free cron service like **[cron-job.org](https://cron-job.org)**:
+
+1. Sign up for free at [cron-job.org](https://cron-job.org).
+2. Click **Create Cronjob**.
+3. **Title**: `CT-Forwards Userbot Runner`
+4. **URL**:
+   - If using `CRON_SECRET`:
+     `https://your-app.vercel.app/api/cron?secret=YOUR_CRON_SECRET`
+   - If `CRON_SECRET` is not set:
+     `https://your-app.vercel.app/api/cron`
+5. **Execution Schedule**: Select **Every 1 minute**.
+6. **Request Method**: `GET`
+7. Save the cronjob. It will ping your Vercel deployment every 60 seconds to fetch new messages and forward them silently!
 
 ---
 

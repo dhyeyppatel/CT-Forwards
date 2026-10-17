@@ -84,6 +84,7 @@ def verify_cron_authorization(
     authorization: Optional[str] = Header(None),
     x_cron_secret: Optional[str] = Header(None),
     secret: Optional[str] = Query(None),
+    key: Optional[str] = Query(None),
 ):
     """Verify incoming cron or webhook trigger authentication."""
     expected_secret = os.getenv("CRON_SECRET", "").strip()
@@ -96,8 +97,9 @@ def verify_cron_authorization(
         if token == expected_secret:
             return True
 
-    # Check custom header or query param
-    if x_cron_secret == expected_secret or secret == expected_secret:
+    # Check custom header or query param (?secret=... or ?key=...)
+    provided_secret = x_cron_secret or secret or key
+    if provided_secret == expected_secret:
         return True
 
     raise HTTPException(status_code=401, detail="Unauthorized: Invalid cron secret")
