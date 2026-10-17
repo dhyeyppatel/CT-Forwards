@@ -242,6 +242,7 @@ async def root():
 
 
 @app.get("/api/health")
+@app.get("/health")
 async def health_check():
     config, db, ptb_app, init_error = await get_context()
     mode = config.MODE if config else "userbot"
@@ -255,6 +256,7 @@ async def health_check():
 
 
 @app.post("/api/webhook")
+@app.post("/webhook")
 async def telegram_webhook(request: Request):
     """
     Receives Telegram Bot updates via Webhook.
@@ -280,6 +282,7 @@ async def telegram_webhook(request: Request):
 
 
 @app.api_route("/api/cron", methods=["GET", "POST"])
+@app.api_route("/cron", methods=["GET", "POST"])
 async def cron_userbot_sync(
     request: Request,
     auth=Depends(verify_cron_authorization),
@@ -299,6 +302,7 @@ async def cron_userbot_sync(
 
 
 @app.api_route("/api/trigger-userbot", methods=["GET", "POST"])
+@app.api_route("/trigger-userbot", methods=["GET", "POST"])
 async def trigger_userbot(
     request: Request,
     auth=Depends(verify_cron_authorization),
@@ -317,6 +321,7 @@ async def trigger_userbot(
 
 
 @app.get("/api/setup")
+@app.get("/setup")
 async def setup_webhook():
     """
     Helper to set the Telegram Bot webhook URL.
