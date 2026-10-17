@@ -144,6 +144,10 @@ def verify_cron_authorization(
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
+@app.get("/api", response_class=HTMLResponse)
+@app.get("/api/", response_class=HTMLResponse)
+@app.get("/api/index", response_class=HTMLResponse)
+@app.get("/index", response_class=HTMLResponse)
 async def root():
     config, db, ptb_app, init_error = await get_context()
 
